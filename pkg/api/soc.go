@@ -18,6 +18,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
 	"github.com/ethersphere/bee/v2/pkg/postage"
 	"github.com/ethersphere/bee/v2/pkg/soc"
+	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storer"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"github.com/gorilla/mux"
@@ -52,10 +53,30 @@ func (s *Service) socUploadHandler(w http.ResponseWriter, r *http.Request) {
 		StampSig       []byte        `map:"Swarm-Postage-Stamp"`
 		Act            bool          `map:"Swarm-Act"`
 		HistoryAddress swarm.Address `map:"Swarm-Act-History-Address"`
+		SwarmTag       uint64        `map:"Swarm-Tag"`
 	}{}
 	if response := s.mapStructure(r.Header, &headers); response != nil {
 		response("invalid header params", logger, w)
 		return
+	}
+
+	var (
+		tag uint64
+		err error
+	)
+	if headers.SwarmTag > 0 {
+		tag, err = s.getOrCreateSessionID(headers.SwarmTag)
+		if err != nil {
+			logger.Debug("get or create tag failed", "error", err)
+			logger.Error(nil, "get or create tag failed")
+			switch {
+			case errors.Is(err, storage.ErrNotFound):
+				jsonhttp.NotFound(w, "tag not found")
+			default:
+				jsonhttp.InternalServerError(w, "cannot get or create tag")
+			}
+			return
+		}
 	}
 
 	if len(headers.BatchID) == 0 && len(headers.StampSig) == 0 {
@@ -65,8 +86,8 @@ func (s *Service) socUploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		putter storer.PutterSession
-		err    error
+		putter   storer.PutterSession
+		deferred bool = tag != 0
 	)
 
 	if len(headers.StampSig) != 0 {
@@ -81,16 +102,16 @@ func (s *Service) socUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 		putter, err = s.newStampedPutter(r.Context(), putterOptions{
 			BatchID:  stamp.BatchID(),
-			TagID:    0,
+			TagID:    tag,
 			Pin:      false,
-			Deferred: false,
+			Deferred: deferred,
 		}, &stamp)
 	} else {
 		putter, err = s.newStamperPutter(r.Context(), putterOptions{
 			BatchID:  headers.BatchID,
-			TagID:    0,
+			TagID:    tag,
 			Pin:      false,
-			Deferred: false,
+			Deferred: deferred,
 		})
 	}
 	if err != nil {
